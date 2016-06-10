@@ -30,6 +30,7 @@ type ConfigStructure struct { // nolint: maligned
 	FileSystemPublishRoots map[string]FileSystemPublishRoot `json:"FileSystemPublishEndpoints"`
 	S3PublishRoots         map[string]S3PublishRoot         `json:"S3PublishEndpoints"`
 	SwiftPublishRoots      map[string]SwiftPublishRoot      `json:"SwiftPublishEndpoints"`
+	AzurePublishRoots      map[string]AzurePublishRoot      `json:"AzurePublishEndpoints"`
 }
 
 // FileSystemPublishRoot describes single filesystem publishing entry point
@@ -70,6 +71,14 @@ type SwiftPublishRoot struct {
 	TenantDomainID string `json:"tenantdomainid"`
 	Prefix         string `json:"prefix"`
 	Container      string `json:"container"`
+}
+
+// AzurePublishRoot describes single Azure publishing entry point
+type AzurePublishRoot struct {
+	AccountName string `json:"accountName"`
+	AccountKey  string `json:"accountKey"`
+	Container   string `json:"container"`
+	Prefix      string `json:"prefix"`
 }
 
 // Config is configuration for aptly, shared by all modules

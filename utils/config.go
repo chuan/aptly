@@ -102,6 +102,7 @@ var Config = ConfigStructure{
 	FileSystemPublishRoots: map[string]FileSystemPublishRoot{},
 	S3PublishRoots:         map[string]S3PublishRoot{},
 	SwiftPublishRoots:      map[string]SwiftPublishRoot{},
+	AzurePublishRoots:      map[string]AzurePublishRoot{},
 }
 
 // LoadConfig loads configuration from json file

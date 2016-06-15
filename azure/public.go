@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 )
 
-var maxBlockSizeInByte int = 4 * 1024 * 1024
-
 // PublishedStorage abstract file system with published files (actually hosted on Azure)
 type PublishedStorage struct {
 	wasb      azure.BlobStorageClient
@@ -64,7 +62,7 @@ func (storage *PublishedStorage) PutFile(path string, sourceFilename string) err
 		return fmt.Errorf("error create blob for %s in %s: %s", sourceFilename, storage, err)
 	}
 
-	data := make([]byte, maxBlockSizeInByte)
+	data := make([]byte, azure.MaxBlobBlockSize)
 	for {
 		count, err := source.Read(data)
 		if count == 0 && err == io.EOF {
@@ -72,7 +70,7 @@ func (storage *PublishedStorage) PutFile(path string, sourceFilename string) err
 		} else if err != nil {
 			return err
 		} else {
-			err = storage.wasb.AppendBlock(storage.container, path, data, nil)
+			err = storage.wasb.AppendBlock(storage.container, path, data[:count], nil)
 			if err != nil {
 				return fmt.Errorf("error uploading %s to %s: %s", sourceFilename, storage, err)
 			}
@@ -90,7 +88,8 @@ func (storage *PublishedStorage) RemoveDirs(path string, progress aptly.Progress
 	}
 
 	for _, filename := range filelist {
-		_, err := storage.wasb.DeleteBlobIfExists(storage.container, filepath.Join(storage.prefix, filename), nil)
+		_, err := storage.wasb.DeleteBlobIfExists(storage.container,
+			filepath.Join(storage.prefix, path, filename), nil)
 		if err != nil {
 			return fmt.Errorf("error deleting path %s from %s: %s", filename, storage, err)
 		}

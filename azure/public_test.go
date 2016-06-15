@@ -36,16 +36,24 @@ func randString(n int) string {
 	return string(bytes)
 }
 
-func (s *PublishedStorageSuite) SetUpTest(c *C) {
+func (s *PublishedStorageSuite) SetUpSuite(c *C) {
 	s.accountName = os.Getenv("AZURE_STORAGE_ACCOUNT")
 	if s.accountName == "" {
-		c.Fatal("AZURE_STORAGE_ACCOUNT not set, need an empty storage account to test")
+		println("Please set the the following two environment variables to run the Azure storage tests.")
+		println("  1. AZURE_STORAGE_ACCOUNT")
+		println("  2. AZURE_STORAGE_ACCESS_KEY")
+		c.Skip("AZURE_STORAGE_ACCOUNT not set.")
 	}
 	s.accountKey = os.Getenv("AZURE_STORAGE_ACCESS_KEY")
 	if s.accountKey == "" {
-		c.Fatal("AZURE_STORAGE_ACCESS_KEYnot set")
+		println("Please set the the following two environment variables to run the Azure storage tests.")
+		println("  1. AZURE_STORAGE_ACCOUNT")
+		println("  2. AZURE_STORAGE_ACCESS_KEY")
+		c.Skip("AZURE_STORAGE_ACCESS_KEY not set.")
 	}
+}
 
+func (s *PublishedStorageSuite) SetUpTest(c *C) {
 	container := randContainer()
 	prefix := "lala"
 

@@ -2,12 +2,14 @@ package azure
 
 import (
 	"fmt"
-	azure "github.com/Azure/azure-sdk-for-go/storage"
-	"github.com/smira/aptly/aptly"
-	"github.com/smira/aptly/files"
 	"io"
 	"os"
 	"path/filepath"
+
+	azure "github.com/Azure/azure-storage-go"
+	"github.com/smira/aptly/aptly"
+	"github.com/smira/aptly/files"
+	"github.com/smira/aptly/utils"
 )
 
 // PublishedStorage abstract file system with published files (actually hosted on Azure)
@@ -23,6 +25,7 @@ var (
 	_ aptly.PublishedStorage = (*PublishedStorage)(nil)
 )
 
+// NewPublishedStorage creates published storage from Azure storage credentials
 func NewPublishedStorage(accountName, accountKey, container, prefix string) (*PublishedStorage, error) {
 	client, err := azure.NewBasicClient(accountName, accountKey)
 	result := &PublishedStorage{
@@ -114,7 +117,7 @@ func (storage *PublishedStorage) Remove(path string) error {
 //
 // LinkFromPool returns relative path for the published file to be included in package index
 func (storage *PublishedStorage) LinkFromPool(publishedDirectory string, sourcePool aptly.PackagePool,
-	sourcePath, sourceMD5 string, force bool) error {
+	sourcePath string, sourceChecksums utils.ChecksumInfo, force bool) error {
 
 	_ = sourcePool.(*files.PackagePool)
 
@@ -136,6 +139,7 @@ func (storage *PublishedStorage) LinkFromPool(publishedDirectory string, sourceP
 	}
 
 	destinationMD5, exists := storage.pathCache[relPath]
+	sourceMD5 := sourceChecksums.MD5
 
 	if exists {
 		if destinationMD5 == sourceMD5 {
@@ -171,21 +175,22 @@ func (storage *PublishedStorage) internalFilelist(prefix string) (paths []string
 			Marker:     marker,
 		}
 
-		resp, err := storage.wasb.ListBlobs(storage.container, params)
+		cnt := storage.wasb.GetContainerReference(storage.container)
+		resp, err := cnt.ListBlobs(params)
 
 		if err != nil {
 			return nil, nil, fmt.Errorf("error listing under prefix %s in %s: %s", prefix, storage, err)
-		} else {
-			for _, blob := range resp.Blobs {
-				paths = append(paths, blob.Name[len(prefix):])
-				md5s = append(md5s, blob.Properties.ContentMD5)
-			}
+		}
 
-			if len(resp.NextMarker) > 0 {
-				marker = resp.NextMarker
-			} else {
-				break
-			}
+		for _, blob := range resp.Blobs {
+			paths = append(paths, blob.Name[len(prefix):])
+			md5s = append(md5s, blob.Properties.ContentMD5)
+		}
+
+		if len(resp.NextMarker) > 0 {
+			marker = resp.NextMarker
+		} else {
+			break
 		}
 	}
 
@@ -200,8 +205,8 @@ func (storage *PublishedStorage) Filelist(prefix string) ([]string, error) {
 
 // RenameFile renames (moves) file
 func (storage *PublishedStorage) RenameFile(oldName, newName string) error {
-	sourceBlobUrl := storage.wasb.GetBlobURL(storage.container, filepath.Join(storage.prefix, oldName))
-	err := storage.wasb.CopyBlob(storage.container, filepath.Join(storage.prefix, newName), sourceBlobUrl)
+	sourceBlobURL := storage.wasb.GetBlobURL(storage.container, filepath.Join(storage.prefix, oldName))
+	err := storage.wasb.CopyBlob(storage.container, filepath.Join(storage.prefix, newName), sourceBlobURL)
 	if err != nil {
 		return fmt.Errorf("error copying %s -> %s in %s: %s", oldName, newName, storage, err)
 	}

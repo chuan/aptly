@@ -1,13 +1,15 @@
 package azure
 
 import (
+	"context"
 	"crypto/rand"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	"github.com/smira/aptly/files"
-	"github.com/smira/aptly/utils"
+	"github.com/Azure/azure-storage-blob-go/azblob"
+	"github.com/aptly-dev/aptly/files"
+	"github.com/aptly-dev/aptly/utils"
 	. "gopkg.in/check.v1"
 )
 
@@ -62,23 +64,26 @@ func (s *PublishedStorageSuite) SetUpTest(c *C) {
 
 	s.storage, err = NewPublishedStorage(s.accountName, s.accountKey, container, "")
 	c.Assert(err, IsNil)
-	cnt := s.storage.wasb.GetContainerReference(container)
-	c.Assert(cnt.Create(), IsNil)
+	cnt := s.storage.container
+	_, err = cnt.Create(context.Background(), azblob.Metadata{}, azblob.PublicAccessContainer)
+	c.Assert(err, IsNil)
 
 	s.prefixedStorage, err = NewPublishedStorage(s.accountName, s.accountKey, container, prefix)
 	c.Assert(err, IsNil)
 }
 
 func (s *PublishedStorageSuite) TearDownTest(c *C) {
-	cnt := s.storage.wasb.GetContainerReference(s.storage.container)
-	c.Assert(cnt.Delete(), IsNil)
+	cnt := s.storage.container
+	_, err := cnt.Delete(context.Background(), azblob.ContainerAccessConditions{})
+	c.Assert(err, IsNil)
 }
 
 func (s *PublishedStorageSuite) GetFile(c *C, path string) []byte {
-	blob, err := s.storage.wasb.GetBlob(s.storage.container, path)
-	defer blob.Close()
+	blob := s.storage.container.NewBlobURL(path)
+	resp, err := blob.Download(context.Background(), 0, azblob.CountToEnd, azblob.BlobAccessConditions{}, false, azblob.ClientProvidedKeyOptions{})
 	c.Assert(err, IsNil)
-	data, err := ioutil.ReadAll(blob)
+	body := resp.Body(azblob.RetryReaderOptions{MaxRetryRequests: 3})
+	data, err := ioutil.ReadAll(body)
 	c.Assert(err, IsNil)
 	return data
 }
@@ -138,8 +143,9 @@ func (s *PublishedStorageSuite) TestRemove(c *C) {
 	err = s.storage.Remove("a/b.txt")
 	c.Check(err, IsNil)
 
-	_, err = s.storage.wasb.GetBlob(s.storage.container, "a/b.txt")
-	c.Check(err, ErrorMatches, "(?m).*ErrorCode=BlobNotFound.*")
+	exists, err := s.storage.FileExists("a/b.txt")
+	c.Check(err, IsNil)
+	c.Check(exists, Equals, false)
 }
 
 func (s *PublishedStorageSuite) TestRemoveDirs(c *C) {
@@ -174,13 +180,14 @@ func (s *PublishedStorageSuite) TestRenameFile(c *C) {
 
 	c.Check(s.GetFile(c, "dest.txt"), DeepEquals, []byte("Welcome to Azure!"))
 
-	_, err = s.storage.wasb.GetBlob(s.storage.container, "source.txt")
-	c.Check(err, ErrorMatches, "(?m).*ErrorCode=BlobNotFound.*")
+	exists, err := s.storage.FileExists("source.txt")
+	c.Check(err, IsNil)
+	c.Check(exists, Equals, false)
 }
 
 func (s *PublishedStorageSuite) TestLinkFromPool(c *C) {
 	root := c.MkDir()
-	pool := files.NewPackagePool(root)
+	pool := files.NewPackagePool(root, false)
 
 	sourcePath := filepath.Join(root, "pool/c1/df/mars-invaders_1.03.deb")
 	err := os.MkdirAll(filepath.Dir(sourcePath), 0755)
@@ -197,25 +204,25 @@ func (s *PublishedStorageSuite) TestLinkFromPool(c *C) {
 	c.Assert(err, IsNil)
 
 	// first link from pool
-	err = s.storage.LinkFromPool(filepath.Join("", "pool", "main", "m/mars-invaders"), pool, sourcePath, utils.ChecksumInfo{MD5: "c1df1da7a1ce305a3b60af9d5733ac1d"}, false)
+	err = s.storage.LinkFromPool(filepath.Join("", "pool", "main", "m/mars-invaders"), "mars-invaders_1.03.deb", pool, sourcePath, utils.ChecksumInfo{MD5: "c1df1da7a1ce305a3b60af9d5733ac1d"}, false)
 	c.Check(err, IsNil)
 
 	c.Check(s.GetFile(c, "pool/main/m/mars-invaders/mars-invaders_1.03.deb"), DeepEquals, []byte("Contents"))
 
 	// duplicate link from pool
-	err = s.storage.LinkFromPool(filepath.Join("", "pool", "main", "m/mars-invaders"), pool, sourcePath, utils.ChecksumInfo{MD5: "c1df1da7a1ce305a3b60af9d5733ac1d"}, false)
+	err = s.storage.LinkFromPool(filepath.Join("", "pool", "main", "m/mars-invaders"), "mars-invaders_1.03.deb", pool, sourcePath, utils.ChecksumInfo{MD5: "c1df1da7a1ce305a3b60af9d5733ac1d"}, false)
 	c.Check(err, IsNil)
 
 	c.Check(s.GetFile(c, "pool/main/m/mars-invaders/mars-invaders_1.03.deb"), DeepEquals, []byte("Contents"))
 
 	// link from pool with conflict
-	err = s.storage.LinkFromPool(filepath.Join("", "pool", "main", "m/mars-invaders"), pool, sourcePath2, utils.ChecksumInfo{MD5: "e9dfd31cc505d51fc26975250750deab"}, false)
+	err = s.storage.LinkFromPool(filepath.Join("", "pool", "main", "m/mars-invaders"), "mars-invaders_1.03.deb", pool, sourcePath2, utils.ChecksumInfo{MD5: "e9dfd31cc505d51fc26975250750deab"}, false)
 	c.Check(err, ErrorMatches, ".*file already exists and is different.*")
 
 	c.Check(s.GetFile(c, "pool/main/m/mars-invaders/mars-invaders_1.03.deb"), DeepEquals, []byte("Contents"))
 
 	// link from pool with conflict and force
-	err = s.storage.LinkFromPool(filepath.Join("", "pool", "main", "m/mars-invaders"), pool, sourcePath2, utils.ChecksumInfo{MD5: "e9dfd31cc505d51fc26975250750deab"}, true)
+	err = s.storage.LinkFromPool(filepath.Join("", "pool", "main", "m/mars-invaders"), "mars-invaders_1.03.deb", pool, sourcePath2, utils.ChecksumInfo{MD5: "e9dfd31cc505d51fc26975250750deab"}, true)
 	c.Check(err, IsNil)
 
 	c.Check(s.GetFile(c, "pool/main/m/mars-invaders/mars-invaders_1.03.deb"), DeepEquals, []byte("Spam"))

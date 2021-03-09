@@ -2,7 +2,9 @@ package azure
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,7 +13,6 @@ import (
 
 	"github.com/Azure/azure-storage-blob-go/azblob"
 	"github.com/aptly-dev/aptly/aptly"
-	"github.com/aptly-dev/aptly/files"
 	"github.com/aptly-dev/aptly/utils"
 	"github.com/pkg/errors"
 )
@@ -65,29 +66,52 @@ func (storage *PublishedStorage) PutFile(path string, sourceFilename string) err
 		source *os.File
 		err    error
 	)
+
+	sourceMD5, err := utils.MD5ChecksumForFile(sourceFilename)
+	if err != nil {
+		err = errors.Wrap(err, fmt.Sprintf("error calculating MD5 checksum for file %s", sourceFilename))
+	}
+
 	source, err = os.Open(sourceFilename)
 	if err != nil {
 		return err
 	}
 	defer source.Close()
 
+	err = storage.putFile(path, source, sourceMD5)
+	if err != nil {
+		err = errors.Wrap(err, fmt.Sprintf("error uploading %s to %s", sourceFilename, storage))
+	}
+
+	return err
+}
+
+// putFile uploads file-like object to
+func (storage *PublishedStorage) putFile(path string, source io.ReadSeeker, sourceMD5 string) error {
 	path = filepath.Join(storage.prefix, path)
 
 	blob := storage.container.NewBlockBlobURL(path)
 
-	uploadOptions := azblob.UploadToBlockBlobOptions{
-		BlockSize:   4 * 1024 * 1024,
-		Parallelism: 16}
+	uploadOptions := azblob.UploadStreamToBlockBlobOptions{
+		BufferSize: 4 * 1024 * 1024,
+		MaxBuffers: 8,
+	}
+	if len(sourceMD5) > 0 {
+		decodedMD5, err := hex.DecodeString(sourceMD5)
+		if err != nil {
+			return err
+		}
+		uploadOptions.BlobHTTPHeaders = azblob.BlobHTTPHeaders{
+			ContentMD5: decodedMD5,
+		}
+	}
 
-	_, err = azblob.UploadFileToBlockBlob(
+	_, err := azblob.UploadStreamToBlockBlob(
 		context.Background(),
 		source,
 		blob,
-		uploadOptions)
-
-	if err != nil {
-		err = errors.Wrap(err, fmt.Sprintf("error uploading %s to %s", sourceFilename, storage))
-	}
+		uploadOptions,
+	)
 
 	return err
 }
@@ -111,7 +135,7 @@ func (storage *PublishedStorage) RemoveDirs(path string, progress aptly.Progress
 
 // Remove removes single file under public path
 func (storage *PublishedStorage) Remove(path string) error {
-	blob := storage.container.NewBlobURL(path)
+	blob := storage.container.NewBlobURL(filepath.Join(storage.prefix, path))
 	_, err := blob.Delete(context.Background(), azblob.DeleteSnapshotsOptionNone, azblob.BlobAccessConditions{})
 	if err != nil {
 		err = errors.Wrap(err, fmt.Sprintf("error deleting %s from %s: %s", path, storage, err))
@@ -129,14 +153,11 @@ func (storage *PublishedStorage) Remove(path string) error {
 func (storage *PublishedStorage) LinkFromPool(publishedDirectory, fileName string, sourcePool aptly.PackagePool,
 	sourcePath string, sourceChecksums utils.ChecksumInfo, force bool) error {
 
-	_ = sourcePool.(*files.PackagePool)
-
-	baseName := filepath.Base(sourcePath)
-	relPath := filepath.Join(publishedDirectory, baseName)
+	relPath := filepath.Join(publishedDirectory, fileName)
 	poolPath := filepath.Join(storage.prefix, relPath)
 
 	if storage.pathCache == nil {
-		paths, md5s, err := storage.internalFilelist(relPath)
+		paths, md5s, err := storage.internalFilelist("")
 		if err != nil {
 			return fmt.Errorf("error caching paths under prefix: %s", err)
 		}
@@ -152,6 +173,10 @@ func (storage *PublishedStorage) LinkFromPool(publishedDirectory, fileName strin
 	sourceMD5 := sourceChecksums.MD5
 
 	if exists {
+		if sourceMD5 == "" {
+			return fmt.Errorf("unable to compare object, MD5 checksum missing")
+		}
+
 		if destinationMD5 == sourceMD5 {
 			return nil
 		}
@@ -161,9 +186,17 @@ func (storage *PublishedStorage) LinkFromPool(publishedDirectory, fileName strin
 		}
 	}
 
-	err := storage.PutFile(relPath, sourcePath)
+	source, err := sourcePool.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	err = storage.putFile(relPath, source, sourceMD5)
 	if err == nil {
 		storage.pathCache[relPath] = sourceMD5
+	} else {
+		err = errors.Wrap(err, fmt.Sprintf("error uploading %s to %s: %s", sourcePath, storage, poolPath))
 	}
 
 	return err
@@ -179,8 +212,11 @@ func (storage *PublishedStorage) internalFilelist(prefix string) (paths []string
 	}
 
 	for marker := (azblob.Marker{}); marker.NotDone(); {
-		listBlob, err := storage.container.ListBlobsHierarchySegment(
-			context.Background(), marker, delimiter, azblob.ListBlobsSegmentOptions{})
+		listBlob, err := storage.container.ListBlobsFlatSegment(
+			context.Background(), marker, azblob.ListBlobsSegmentOptions{
+				Prefix:     prefix,
+				MaxResults: 1000,
+				Details:    azblob.BlobListingDetails{Metadata: true}})
 		if err != nil {
 			return nil, nil, fmt.Errorf("error listing under prefix %s in %s: %s", prefix, storage, err)
 		}
@@ -211,21 +247,12 @@ func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadat
 	const leaseDuration = 30
 
 	dstBlobUrl := storage.container.NewBlobURL(filepath.Join(storage.prefix, dst))
-	leaseResp, err := dstBlobUrl.AcquireLease(context.Background(), "", leaseDuration, azblob.ModifiedAccessConditions{})
-	if err != nil || leaseResp.StatusCode() != http.StatusCreated {
-		return fmt.Errorf("error acquiring lease on destination blob %s", dstBlobUrl)
-	}
-	defer dstBlobUrl.BreakLease(context.Background(), azblob.LeaseBreakNaturally, azblob.ModifiedAccessConditions{})
-
-	dstBlobLeaseId := leaseResp.LeaseID()
-
 	srcBlobUrl := storage.container.NewBlobURL(filepath.Join(storage.prefix, src))
-	leaseResp, err = srcBlobUrl.AcquireLease(context.Background(), "", leaseDuration, azblob.ModifiedAccessConditions{})
+	leaseResp, err := srcBlobUrl.AcquireLease(context.Background(), "", leaseDuration, azblob.ModifiedAccessConditions{})
 	if err != nil || leaseResp.StatusCode() != http.StatusCreated {
 		return fmt.Errorf("error acquiring lease on source blob %s", srcBlobUrl)
 	}
 	defer srcBlobUrl.BreakLease(context.Background(), azblob.LeaseBreakNaturally, azblob.ModifiedAccessConditions{})
-
 	srcBlobLeaseId := leaseResp.LeaseID()
 
 	copyResp, err := dstBlobUrl.StartCopyFromURL(
@@ -233,9 +260,7 @@ func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadat
 		srcBlobUrl.URL(),
 		metadata,
 		azblob.ModifiedAccessConditions{},
-		azblob.BlobAccessConditions{
-			LeaseAccessConditions: azblob.LeaseAccessConditions{LeaseID: dstBlobLeaseId},
-		},
+		azblob.BlobAccessConditions{},
 		azblob.DefaultAccessTier,
 		nil)
 	if err != nil {
@@ -267,10 +292,6 @@ func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadat
 			}
 			copyStatus = blobPropsResp.CopyStatus()
 
-			_, err = dstBlobUrl.RenewLease(context.Background(), dstBlobLeaseId, azblob.ModifiedAccessConditions{})
-			if err != nil {
-				return fmt.Errorf("error renewing destination blob lease %s", dstBlobUrl)
-			}
 			_, err = srcBlobUrl.RenewLease(context.Background(), srcBlobLeaseId, azblob.ModifiedAccessConditions{})
 			if err != nil {
 				return fmt.Errorf("error renewing source blob lease %s", srcBlobUrl)
@@ -282,12 +303,12 @@ func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadat
 
 // RenameFile renames (moves) file
 func (storage *PublishedStorage) RenameFile(oldName, newName string) error {
-	return storage.internalCopyOrMoveBlob(oldName, newName, nil, true)
+	return storage.internalCopyOrMoveBlob(oldName, newName, nil, true /* move */)
 }
 
 // SymLink creates a copy of src file and adds link information as meta data
 func (storage *PublishedStorage) SymLink(src string, dst string) error {
-	return storage.internalCopyOrMoveBlob(src, dst, azblob.Metadata{"SymLink": src}, false)
+	return storage.internalCopyOrMoveBlob(src, dst, azblob.Metadata{"SymLink": src}, false /* move */)
 }
 
 // HardLink using symlink functionality as hard links do not exist
@@ -300,7 +321,12 @@ func (storage *PublishedStorage) FileExists(path string) (bool, error) {
 	blob := storage.container.NewBlobURL(filepath.Join(storage.prefix, path))
 	resp, err := blob.GetProperties(context.Background(), azblob.BlobAccessConditions{}, azblob.ClientProvidedKeyOptions{})
 	if err != nil {
-		return false, err
+		storageError, ok := err.(azblob.StorageError)
+		if ok && string(storageError.ServiceCode()) == string(azblob.StorageErrorCodeBlobNotFound) {
+			return false, nil
+		} else {
+			return false, err
+		}
 	} else if resp.StatusCode() == http.StatusNotFound {
 		return false, nil
 	} else if resp.StatusCode() == http.StatusOK {

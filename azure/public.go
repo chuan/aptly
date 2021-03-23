@@ -36,13 +36,13 @@ func NewPublishedStorage(accountName, accountKey, container, prefix string) (*Pu
 		return nil, err
 	}
 
-	containerUrl, err := url.Parse(fmt.Sprintf("https://%s.blob.core.windows.net/%s", accountName, container))
+	containerURL, err := url.Parse(fmt.Sprintf("https://%s.blob.core.windows.net/%s", accountName, container))
 	if err != nil {
 		return nil, err
 	}
 
 	result := &PublishedStorage{
-		container: azblob.NewContainerURL(*containerUrl, azblob.NewPipeline(credential, azblob.PipelineOptions{})),
+		container: azblob.NewContainerURL(*containerURL, azblob.NewPipeline(credential, azblob.PipelineOptions{})),
 		prefix:    prefix,
 	}
 
@@ -69,7 +69,7 @@ func (storage *PublishedStorage) PutFile(path string, sourceFilename string) err
 
 	sourceMD5, err := utils.MD5ChecksumForFile(sourceFilename)
 	if err != nil {
-		err = errors.Wrap(err, fmt.Sprintf("error calculating MD5 checksum for file %s", sourceFilename))
+		return err
 	}
 
 	source, err = os.Open(sourceFilename)
@@ -87,7 +87,7 @@ func (storage *PublishedStorage) PutFile(path string, sourceFilename string) err
 }
 
 // putFile uploads file-like object to
-func (storage *PublishedStorage) putFile(path string, source io.ReadSeeker, sourceMD5 string) error {
+func (storage *PublishedStorage) putFile(path string, source io.Reader, sourceMD5 string) error {
 	path = filepath.Join(storage.prefix, path)
 
 	blob := storage.container.NewBlockBlobURL(path)
@@ -246,16 +246,16 @@ func (storage *PublishedStorage) Filelist(prefix string) ([]string, error) {
 func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadata azblob.Metadata, move bool) error {
 	const leaseDuration = 30
 
-	dstBlobUrl := storage.container.NewBlobURL(filepath.Join(storage.prefix, dst))
+	dstBlobURL := storage.container.NewBlobURL(filepath.Join(storage.prefix, dst))
 	srcBlobUrl := storage.container.NewBlobURL(filepath.Join(storage.prefix, src))
 	leaseResp, err := srcBlobUrl.AcquireLease(context.Background(), "", leaseDuration, azblob.ModifiedAccessConditions{})
 	if err != nil || leaseResp.StatusCode() != http.StatusCreated {
 		return fmt.Errorf("error acquiring lease on source blob %s", srcBlobUrl)
 	}
 	defer srcBlobUrl.BreakLease(context.Background(), azblob.LeaseBreakNaturally, azblob.ModifiedAccessConditions{})
-	srcBlobLeaseId := leaseResp.LeaseID()
+	srcBlobLeaseID := leaseResp.LeaseID()
 
-	copyResp, err := dstBlobUrl.StartCopyFromURL(
+	copyResp, err := dstBlobURL.StartCopyFromURL(
 		context.Background(),
 		srcBlobUrl.URL(),
 		metadata,
@@ -275,29 +275,29 @@ func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadat
 					context.Background(),
 					azblob.DeleteSnapshotsOptionNone,
 					azblob.BlobAccessConditions{
-						LeaseAccessConditions: azblob.LeaseAccessConditions{LeaseID: srcBlobLeaseId},
+						LeaseAccessConditions: azblob.LeaseAccessConditions{LeaseID: srcBlobLeaseID},
 					})
 				return err
-			} else {
-				return nil
 			}
+			return nil
 		} else if copyStatus == azblob.CopyStatusPending {
 			time.Sleep(1 * time.Second)
-			blobPropsResp, err := dstBlobUrl.GetProperties(
+			blobPropsResp, err := dstBlobURL.GetProperties(
 				context.Background(),
-				azblob.BlobAccessConditions{LeaseAccessConditions: azblob.LeaseAccessConditions{LeaseID: srcBlobLeaseId}},
+				azblob.BlobAccessConditions{LeaseAccessConditions: azblob.LeaseAccessConditions{LeaseID: srcBlobLeaseID}},
 				azblob.ClientProvidedKeyOptions{})
 			if err != nil {
-				return fmt.Errorf("error getting destination blob properties %s", dstBlobUrl)
+				return fmt.Errorf("error getting destination blob properties %s", dstBlobURL)
 			}
 			copyStatus = blobPropsResp.CopyStatus()
 
-			_, err = srcBlobUrl.RenewLease(context.Background(), srcBlobLeaseId, azblob.ModifiedAccessConditions{})
+			_, err = srcBlobUrl.RenewLease(context.Background(), srcBlobLeaseID, azblob.ModifiedAccessConditions{})
 			if err != nil {
 				return fmt.Errorf("error renewing source blob lease %s", srcBlobUrl)
 			}
+		} else {
+			return fmt.Errorf("error copying %s -> %s in %s: %s", dst, src, storage, copyStatus)
 		}
-		return fmt.Errorf("error copying %s -> %s in %s: %s", dst, src, storage, copyStatus)
 	}
 }
 

@@ -247,17 +247,17 @@ func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadat
 	const leaseDuration = 30
 
 	dstBlobURL := storage.container.NewBlobURL(filepath.Join(storage.prefix, dst))
-	srcBlobUrl := storage.container.NewBlobURL(filepath.Join(storage.prefix, src))
-	leaseResp, err := srcBlobUrl.AcquireLease(context.Background(), "", leaseDuration, azblob.ModifiedAccessConditions{})
+	srcBlobURL := storage.container.NewBlobURL(filepath.Join(storage.prefix, src))
+	leaseResp, err := srcBlobURL.AcquireLease(context.Background(), "", leaseDuration, azblob.ModifiedAccessConditions{})
 	if err != nil || leaseResp.StatusCode() != http.StatusCreated {
-		return fmt.Errorf("error acquiring lease on source blob %s", srcBlobUrl)
+		return fmt.Errorf("error acquiring lease on source blob %s", srcBlobURL)
 	}
-	defer srcBlobUrl.BreakLease(context.Background(), azblob.LeaseBreakNaturally, azblob.ModifiedAccessConditions{})
+	defer srcBlobURL.BreakLease(context.Background(), azblob.LeaseBreakNaturally, azblob.ModifiedAccessConditions{})
 	srcBlobLeaseID := leaseResp.LeaseID()
 
 	copyResp, err := dstBlobURL.StartCopyFromURL(
 		context.Background(),
-		srcBlobUrl.URL(),
+		srcBlobURL.URL(),
 		metadata,
 		azblob.ModifiedAccessConditions{},
 		azblob.BlobAccessConditions{},
@@ -271,7 +271,7 @@ func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadat
 	for {
 		if copyStatus == azblob.CopyStatusSuccess {
 			if move {
-				_, err = srcBlobUrl.Delete(
+				_, err = srcBlobURL.Delete(
 					context.Background(),
 					azblob.DeleteSnapshotsOptionNone,
 					azblob.BlobAccessConditions{
@@ -291,9 +291,9 @@ func (storage *PublishedStorage) internalCopyOrMoveBlob(src, dst string, metadat
 			}
 			copyStatus = blobPropsResp.CopyStatus()
 
-			_, err = srcBlobUrl.RenewLease(context.Background(), srcBlobLeaseID, azblob.ModifiedAccessConditions{})
+			_, err = srcBlobURL.RenewLease(context.Background(), srcBlobLeaseID, azblob.ModifiedAccessConditions{})
 			if err != nil {
-				return fmt.Errorf("error renewing source blob lease %s", srcBlobUrl)
+				return fmt.Errorf("error renewing source blob lease %s", srcBlobURL)
 			}
 		} else {
 			return fmt.Errorf("error copying %s -> %s in %s: %s", dst, src, storage, copyStatus)
@@ -324,16 +324,12 @@ func (storage *PublishedStorage) FileExists(path string) (bool, error) {
 		storageError, ok := err.(azblob.StorageError)
 		if ok && string(storageError.ServiceCode()) == string(azblob.StorageErrorCodeBlobNotFound) {
 			return false, nil
-		} else {
-			return false, err
 		}
-	} else if resp.StatusCode() == http.StatusNotFound {
-		return false, nil
+		return false, err
 	} else if resp.StatusCode() == http.StatusOK {
 		return true, nil
-	} else {
-		return false, fmt.Errorf("error checking if blob %s exists %d", blob, resp.StatusCode())
 	}
+	return false, fmt.Errorf("error checking if blob %s exists %d", blob, resp.StatusCode())
 }
 
 // ReadLink returns the symbolic link pointed to by path.

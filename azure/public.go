@@ -120,17 +120,18 @@ func (storage *PublishedStorage) putFile(path string, source io.Reader, sourceMD
 func (storage *PublishedStorage) RemoveDirs(path string, progress aptly.Progress) error {
 	filelist, err := storage.Filelist(path)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	for _, filename := range filelist {
 		blob := storage.container.NewBlobURL(filepath.Join(storage.prefix, path, filename))
 		_, err := blob.Delete(context.Background(), azblob.DeleteSnapshotsOptionNone, azblob.BlobAccessConditions{})
 		if err != nil {
-			err = errors.Wrap(err, fmt.Sprintf("error deleting path %s from %s: %s", filename, storage, err))
+			return fmt.Errorf("error deleting path %s from %s: %s", filename, storage, err)
 		}
 	}
-	return err
+
+	return nil
 }
 
 // Remove removes single file under public path
